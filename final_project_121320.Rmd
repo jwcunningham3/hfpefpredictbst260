@@ -1,0 +1,324 @@
+---
+title: "CPET Final Project"
+author: "Emily Lau & Jon Cunningham"
+date: "12/9/2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Overview and Motivation
+
+Heart failure (HF) is an important public health concern, affecting over 6 million individuals in the United States. HF with preserved ejection fraction (HFpEF) has become the leading form of HF and its prevalence is rising. HFpEF is a type of heart failure where the pumping function of the heart is normal but the relaxation is abnormal. There is no consensus on how to define HFpEF but the minimum criteria for being diagnosed with HFpEF includes signs or symptoms of HF (shortness of breath, fluid retention, reduced exercise capacity, etc) and normal pumping function of the heart as defined as a left ventricular ejection fraction (LVEF) ≥ 50%. Patients with signs or symptoms of HF and a LVEF <50% are classified as patients with HF with reduced ejection fraction (HFrEF). Overall, HFpEF is a diagnostic and therapeutic challenge, given our limited understanding of causal and contributing factors and clinical heterogeneity. Moreover, there exists no effective targeted therapy for HFpEF to this date. 
+
+Exercise intolerance is a hallmark feature of HFpEF and deficits in exercise reserve (how well your heart and lungs are working during exercise) contribute to the phenotype of clinical HFpEF. One way of measuring exercise reserve is through a specialized exercise test called a cardiopulmonary exercise test (CPET). During a CPET, patients undergo supervised exercise either on a treadmill or stationary bike. Prior to exercise, patients undergo placement of a pressure catheter through their internal jugular vein, which measures pressures in the heart continuously. The patients also wear a gas exchange mask during the test that allows for measurements of gas exchange parameters.
+
+# Related work
+
+Previous work established the contribution of exercise parameters to clinical HFpEF. In a study of 175 patients referred for CPET, it was noted that one exercise parameter called the pulmonary capillary wedge pressure (PCWP) by cardiac output (CO) slope is associated with exercise capacity and HF outcomes. The authors found that elevated PCWP/CO slope during exercise (> 2 mmHg/L/Min) predicts exercise capacity and HF outcomes. This work highlights that our current tools used to diagnose HF (which rely on measures during rest) are insufficient and that assessment of exercise parameters like PCWP/CO may refine early HFpEF diagnosis.  
+
+A recent study examined how many patients with HFpEF by exercise or physiologic criteria would be missed using standard clinical HF criteria. Ho and colleagues examined 461 patients with shortness of breath and a LVEF ≥ 50%, and found that 243 patients had exercise evidence of HFpEF. Of those 243 patients, only 161 met HF criteria by the American Cardiology of Cardiology/American Heart Association definition, 161 met the European Society of Cardiology definition, and 41 met the Heart Failure Society of America definition. This work demonstrates that our current definitions are not including a large proportion of individuals with exercise evidence of HFpEF. 
+
+# Initial Questions
+
+In this context, we sought to explore how many patients without a prior diagnosis of HF who undergo CPET for unexplained shortness of breath actually have a diagnosis of HFpEF by exercise criteria. Second, examined what clinical variables ascertained prior to CPET may predict HFpEF diagnosis by exercise criteria using CPET. Finally, we sought to combine these variables into a useful clinical algorithm for identifying patients likely to have exercise criteria for HFpEF by CPET before the CPET is performed. 
+
+What proportion of patients undergoing CPET for unexplained shortness of breath are found to have hemodynamics consistent with HFpEF?
+
+What variables known prior to CPET are associated with likelihood of HFpEF diagnosis on CPET? 
+
+Can these variables be combined into a useful clinical algorithm for identifying patients likely to have HFpEF by CPET before the CPET is performed? 
+
+What is the performance of such scores derived by decision tree, random forest, or k nearest neighbors? 
+
+# Exploratory Analysis
+
+```{r}
+library(data.table)
+library(tidyverse)
+library(tableone)
+library(readr)
+library(caret)
+library(stringr)
+library(tree)
+library(MASS)
+library(e1071)
+library(splitstackshape)
+library(randomForest)
+
+data <- fread("cpet_database.csv")
+
+```
+
+First we identified 112 patients patients with known heart failure prior to CPET, and excluded them. 
+
+```{r}
+count(data, chf==1)
+
+no_hf <- data %>%
+  filter(chf==0)
+```
+Next, we explored the distribution of left ventricular ejection fraction, identified 29 patients with reduced ejection fraction (less than 50%), and excluded them. The majority of patients in this cohort had preserved ejection fraction. 
+
+```{r}
+
+no_hf %>% 
+  ggplot(aes(lvef))+
+  geom_histogram(binwidth=1, color="black")+
+  xlab("Ejection Fraction")+
+  ylab("Number of individuals")+
+  geom_vline(xintercept=50)
+count(no_hf, lvef==50)
+
+lvef_over50 <- no_hf %>%
+  mutate(ef_50 = ifelse(lvef>49,1,0))
+
+count(lvef_over50, ef_50==1)
+
+lvef_over50 <- lvef_over50 %>%
+  filter(ef_50==1)
+
+```
+Next, we explored how many of these patient had the outcome of interest, HFpEF on CPET testing or exercise HFpEF. 291 patients were found to have HFpEF on CPET. 
+
+```{r }
+count(lvef_over50, hfpef_phys==1)
+
+```
+
+Next, we explored key covariates such as age, sex, body mass index (BMI), total cholesterol, HDL, LDL, diabetes, hypertension, hyperlipidemia, smoking, alcohol use, and prior myocardial infarction. 
+Since this analysis showed that the quantitative lipid measurements were missing in ~70% of patients, we decided not to include lipid measurements as covariates and instead, used thecategorical variable hyperlipidemia. Diastolic BP was missing in 13% of individuals and was also eliminated. 
+
+```{r}
+myVars <- c("age", "sex", "bmi", "t_chol", "ldl", "hdl", "htn", "dm", "smoke", "etoh", "mi", "diuretic", "sbp_r", "dbp_r", "hr_rest")
+catVars <- c("sex", "htn", "dm", "smoke", "etoh", "mi", "diuretic")
+table1 <- CreateTableOne(vars = myVars, data = lvef_over50, factorVars = catVars)
+summary(table1)
+ 
+# Make a new myvars not including lipid variables
+myVars <- c("age", "sex", "bmi", "htn", "dm", "smoke", "etoh", "mi", "diuretic", "sbp_r", "hr_rest")
+
+```
+We also decided to combine insulin and non-insulin dependent diabetes into one binary variable (given low number of IDDM). Finally, we combined former and current smoking into a binary variable (given low number of current smokers).
+
+```{r}
+lvef_over50_combine <- lvef_over50 %>%
+  mutate(dm_new = ifelse(dm>0, 1, 0)) %>%
+  mutate(smoke_new = ifelse(smoke>0,1,0))
+
+summary(lvef_over50_combine$dm_new)
+summary(lvef_over50_combine$smoke_new)
+
+```
+With these cleaned covariates, we created a new Table 1 for the full cohort. 
+```{r}
+myVars <- c("age", "sex", "bmi", "htn", "dm_new", "smoke_new", "etoh", "mi", "diuretic", "sbp_r", "hr_rest")
+catVars <- c("sex", "htn", "dm_new", "smoke_new", "etoh", "mi", "diuretic")
+
+table1_new <- CreateTableOne(vars = myVars, data = lvef_over50_combine, factorVars = catVars)
+table1_new
+
+```
+
+
+# Final Analysis
+To begin our final analysis, we report and compare the mean age and proportion of covariates between patients who did and did not have HFpEF on CPET (our outcome of interest). 
+```{r}
+table1_group <- CreateTableOne(vars = myVars, data = lvef_over50_combine, factorVars = catVars, strata = "hfpef_phys")
+table1_group
+```
+
+For continuous variables, we used box plots to visualize the differences between patients with and without HFpEF. These plots clearly demonstrate that HFpEF patients are older, had higher BMI and blood pressure, and slightly lower heart rates.  
+
+```{r}
+lvef_over50_combine$hfpef_phys <- as.factor(lvef_over50_combine$hfpef_phys)
+lvef_over50_combine %>% 
+  ggplot(aes(x=hfpef_phys, y=age))+
+  geom_boxplot()+
+  ylab("Age (Years)")
+
+lvef_over50_combine %>% 
+  ggplot(aes(x=hfpef_phys, y=bmi))+
+  geom_boxplot()+
+  ylab("Body Mass Index (kg/m2)")
+
+lvef_over50_combine %>% 
+  ggplot(aes(x=hfpef_phys, y=sbp_r))+
+  geom_boxplot()+
+  ylab("Systolic Blood Pressure (mmHg)")
+
+lvef_over50_combine %>% 
+  ggplot(aes(x=hfpef_phys, y=hr_rest))+
+  geom_boxplot()+
+  ylab("Heart Rate (Beats per Minute)")
+
+
+```
+
+# Logistic Regression to Predict HFpEF on CPET / Creation of Forest Plot
+Next, we performed logistic regression to identify multivariable associations between the covariates and the outcome of interest, HFpEF physiology on CPET. Age, BMI, and diuretic use were found to be significantly associated with HFpEF on CPET after multivariable adjustment. We displayed these results in a Forest Plot. 
+
+```{r}
+fit <- glm(hfpef_phys ~ age+sex+bmi+htn+dm_new+smoke_new+etoh+mi+diuretic+sbp_r+hr_rest, data=lvef_over50_combine, family = binomial(), na.action=na.omit)
+
+summary(fit)
+exp(coef(fit))
+exp(confint.default(fit))
+
+oddsratios <- data.frame(
+  coef = names(coef(fit)),
+  or = round(exp(coef(fit)), 2),
+  ci_lb = round(exp(confint(fit, level=0.95)), 2)[,1],
+  ci_ub = round(exp(confint(fit, level=0.95)), 2)[,2],
+  stringsAsFactors = FALSE, row.names=NULL
+)
+
+
+#oddsratios
+
+oddsratios_new<- oddsratios %>% 
+  filter(coef !="(Intercept)")
+
+oddsratios_new
+```
+
+
+
+```{r}
+
+
+oddsratios_new %>% 
+  ggplot(aes(x=or, xmin = ci_lb, xmax = ci_ub, 
+             y = coef))+
+           geom_vline(xintercept =1, linetype = "longdash")+
+           geom_errorbarh(height=0.15)+
+           geom_point(size=5, shape=18)+
+            scale_x_continuous(trans="log2")+
+           scale_alpha_identity()+
+    xlab("Odds Ratio (95% CI)")+
+  ylab("Covariate")
+```
+
+**Machine Learning**
+In this section, we used 3 machine learning techniques--decision tree, random forest, and K nearest neighbors--in order to develop prediction of HFpEF. 
+
+Unfortunately, several of the methods (at least random forest and K nearest neighbors) cannot tolerate any missing data for any covariate. Therefore, before beginning we eliminated these patients, reducing total sample size from 622 to 562 (60 patients lost).
+
+We then divided the available data into 60% training set and 40% test set to avoid overfitting. There are 338 patients in the training set and 224 in the test set. 
+
+```{r}
+# Create dataframe with only the variables of interest
+myvars_hpfef <- c(myVars, "hfpef_phys")
+cpet_covars <- lvef_over50_combine[, ..myvars_hpfef]
+
+cpet_covars_nona <- cpet_covars[complete.cases(cpet_covars),]
+dim(cpet_covars)
+dim(cpet_covars_nona)
+
+
+set.seed(1)
+train_index <- createDataPartition(cpet_covars_nona$hfpef_phys, times = 1, p = 0.6, list = FALSE)
+train_set <- cpet_covars_nona[train_index, ]
+test_set <- cpet_covars_nona[-train_index, ]
+
+dim(train_set)
+dim(test_set)
+
+```
+
+
+*Model 1: Decision Tree*: The first model was the decision tree. The accuracy of this model was 58% and the sensitivity and specificity were 66% and 50%, respectively. 
+
+```{r}
+set.seed(1)
+fit_tree = tree(as.factor(hfpef_phys) ~ ., train_set)
+summary(fit_tree)
+preds_tree <- predict(fit_tree, newdata = test_set,  type = "class")
+
+test_tree <- as.factor(test_set$hfpef_phys) 
+confusionMatrix(preds_tree, test_tree)
+
+
+
+```
+
+The decision tree provides high clinical interpretability. This tree diagram provides a potential clinical algorithm that could be easily printed and followed by a bedside clinician even without access to a computer. 
+```{r}
+plot(fit_tree, type = "uniform")
+text(fit_tree, cex = 1)
+```
+
+*Model 2: Random Forest*
+Next, we fit a random forest model. Since we have a small number of selected covariates, we allowed the model to include all of them in the model (mytry=11). The random forest model had an overall accuracy, sensitivity, and specificity similar to the decision tree, but is less interpretable.  
+
+
+```{r}
+set.seed(1)
+fit_forest = randomForest(as.factor(hfpef_phys) ~ ., train_set, mtry=11, na.action = na.exclude)
+summary(fit_forest)
+preds_forest <- predict(fit_forest, newdata = test_set, type = "class")
+confusionMatrix(preds_forest, test_tree)
+```
+
+
+
+* K Nearest Neighbors*
+Finally, we fit a K nearest neighbors model beginning with the default k=5. Here, the accuracy of 64% and sensitivity and specificity of 68% and 60%, respectively, were slightly higher than the previous 2 models.
+
+```{r}
+set.seed(1)
+
+fit_knn = knn3(as.factor(hfpef_phys) ~ ., train_set, k=5)
+summary(fit_knn)
+preds_knn <- predict(fit_knn, newdata = test_set, type = "class")
+
+confusionMatrix(preds_knn, test_tree)
+
+```
+
+Optimizing the k parameter for K nearest neightbors:
+Since this K nearest neighbors model appears to be out-performing the others, we decided to investigate different values for K to compare the test set performance (to optimize the k parameter). 
+
+We tried k = 3, k=5 (above), k = 10, and k = 50. 
+We find the following accuracy:
+k = 3: Accuracy 0.598
+k = 5: Accuracy 0.643
+k = 10: Accuracy 0.616
+k = 50: Accuracy 0.580
+
+We therefore decided to retain the original model, k=5, which has the highest accuracy. 
+
+```{r}
+
+#k = 3
+set.seed(1)
+fit_knn = knn3(as.factor(hfpef_phys) ~ ., train_set, k=3)
+preds_knn <- predict(fit_knn, newdata = test_set, type = "class")
+confusionMatrix(preds_knn, test_tree)
+
+#k = 10
+set.seed(1)
+fit_knn = knn3(as.factor(hfpef_phys) ~ ., train_set, k=10)
+preds_knn <- predict(fit_knn, newdata = test_set, type = "class")
+confusionMatrix(preds_knn, test_tree)
+
+#k = 50
+set.seed(1)
+fit_knn = knn3(as.factor(hfpef_phys) ~ ., train_set, k=50)
+preds_knn <- predict(fit_knn, newdata = test_set, type = "class")
+confusionMatrix(preds_knn, test_tree)
+
+
+```
+
+* Summary of Machine Learning Models*
+Unfortunately, the performance of our machine learning models was poor, with accuracy between 58 and 64%. This may have occurred for 3 reasons. First, the task of predicting HFpEF in this population is medically difficult. These patients were referred for advanced testing precisely because the cause of their shortness of breath was uncertain. Second, we used a small number of covariates (only 11). Third, our sample size was small; model training would likely be more accurate with a larger sample. 
+
+Clinical application: 
+The most accurate model was K nearest neighbors with k = 5, which had an accuracy of 64%. The overall proportion of patients in the test set with the outcome of HFpEF was 53%, and the positive predictive value of this model was 66%. Therefore, for a clinician who is not sure about clinical diagnosis of HFpEF, a positive result on this model cold help increase their confidence by 13%. 
+
+Clinicians might also wish to use the less accurate but more interpretable decision tree model. 
+
+In conclusion, this analysis highlights the challenges facing clinicians in the diagnosis of HFpEF. We were able to identify several covariates which are associated with higher likelihood of HFpEF diagnosis: older age, higher BMI, and greater diuretic use. Our best machine learning model, k nearest neighbors, achieved modest sensitivity and specificity. Future research using more covariates and greater sample size could glean additional insights and improve prediction. 
